@@ -1,13 +1,14 @@
-﻿import os
-import re
-import mimetypes
-from urllib.parse import urlparse
-from typing import Optional, Tuple
+﻿# server.py
+import os
+import sys
+import traceback
 
-import httpx
 from fastapi import FastAPI, UploadFile, File, Form, Header, HTTPException
 from fastapi.responses import JSONResponse
 from playwright.sync_api import sync_playwright
+
+from dotenv import load_dotenv
+load_dotenv()  # <-- make sure .env is loaded for GLADE_USERNAME/PASSWORD, etc.
 
 from glade.auth import fast_login
 from glade.navigation import (
@@ -17,154 +18,123 @@ from glade.navigation import (
 )
 from glade.documents import (
     enter_documents_passcode_1111,
-    open_initial_documents_checklist,   # always Initial
-    add_document_and_upload,            # expects (page, title, upload_payload)
+    open_initial_documents_checklist,
+    add_document_and_upload,
 )
-from glade.classify import classify_for_checklist  # we ignore its checklist value
+from glade.classify import classify_for_checklist  # checklist ignored; we always use Initial
 
 HEADLESS  = os.getenv("HEADLESS", "true").lower() == "true"
 SLOW_MO   = int(os.getenv("SLOW_MO", "0"))
 ZAP_SHARED_SECRET = os.getenv("ZAP_SHARED_SECRET", "")
 
-app = FastAPI()
+# Optional: flip to 'true' to include full tracebacks in JSON
+DEBUG_TRACES = os.getenv("DEBUG_TRACES", "true").lower() == "true"
 
+def _exc_details() -> str:
+    if DEBUG_TRACES:
+        return "".join(traceback.format_exception(*sys.exc_info()))
+    # fallback to just the exception string
+    etype, e, _ = sys.exc_info()
+    return f"{etype.__name__}: {e}" if e else (etype.__name__ if etype else "UnknownError")
+
+app = FastAPI()
 
 @app.get("/")
 def health():
     return {"ok": True}
 
-
-async def _download_url(url: str) -> Tuple[bytes, str, str]:
-    """
-    Download a file from a signed CloudConvert/S3 URL.
-    Returns (content_bytes, filename, content_type).
-    """
-    async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
-        r = await client.get(url)
-        r.raise_for_status()
-        content = r.content
-        content_type = (r.headers.get("content-type") or "application/octet-stream").split(";")[0].strip()
-
-        # Try to extract filename from Content-Disposition
-        fname = ""
-        cd = r.headers.get("content-disposition") or ""
-        m = re.search(r'filename\*?=(?:UTF-8\'\')?"?([^";]+)"?', cd)
-        if m:
-            fname = m.group(1)
-
-        # Fallback to URL path
-        if not fname:
-            path = urlparse(str(r.url)).path
-            base = os.path.basename(path)
-            if base:
-                fname = base
-
-        # Final fallback
-        if not fname:
-            ext = mimetypes.guess_extension(content_type) or ".bin"
-            fname = f"upload{ext}"
-
-        return content, fname, content_type
-
-
 @app.post("/upload-from-zap-email")
 async def upload_from_zap_email(
     client_email: str = Form(...),
-    doc_name: str = Form(...),                 # AI filename from Zapier
-    file: Optional[UploadFile] = File(None),   # Gmail attachment (binary OR text/uri-list)
-    file_url: Optional[str] = Form(None),      # If you send the CloudConvert URL in a separate field
-    x_zap_secret: Optional[str] = Header(None),
+    doc_name: str   = Form(...),            # AI filename from Zapier
+    file: UploadFile = File(...),           # Gmail attachment (binary)
+    x_zap_secret: str | None = Header(None),
 ):
-    # Optional shared-secret
+    # Shared-secret guard (optional)
     if ZAP_SHARED_SECRET and x_zap_secret != ZAP_SHARED_SECRET:
         raise HTTPException(status_code=401, detail="bad secret")
 
-    # Classify just to get the document title; we force 'initial' checklist below
-    _ignored_checklist, doc_title = classify_for_checklist(doc_name)
+    # Make sure creds exist before we spin up a browser
+    u = os.getenv("GLADE_USERNAME")
+    p = os.getenv("GLADE_PASSWORD")
+    if not u or not p:
+        return JSONResponse(
+            {
+                "ok": False,
+                "matched_in_glade": False,
+                "fallback_to_drive": True,
+                "error": "Missing GLADE_USERNAME or GLADE_PASSWORD in environment (.env not loaded?)",
+                "routed_checklist": "initial",
+                "item_title": None,
+            },
+            status_code=500,
+        )
+
+    # We only want the *title/category* from the AI; checklist is always "initial" now
+    _unused_checklist, doc_title = classify_for_checklist(doc_name)
     routed_checklist = "initial"
 
-    # Normalize file input:
-    #  - If Zap sent a real uploaded file → use it
-    #  - If Zap used "File" but content_type is text/uri-list → download the URL inside
-    #  - If Zap sent file_url as a text field → download it
-    source = "unknown"
-    used_url = None
-    content_bytes: Optional[bytes] = None
-    filename: Optional[str] = None
-    content_type: Optional[str] = None
-
-    if file is not None:
-        if (file.content_type or "").startswith("text/uri-list"):
-            # The file field actually contains a URL string
-            text = (await file.read()).decode(errors="ignore").strip()
-            url_candidate = text.splitlines()[0].strip()
-            if not (url_candidate.startswith("http://") or url_candidate.startswith("https://")):
-                raise HTTPException(status_code=422, detail="file field contained text/uri-list but no URL")
-            content_bytes, filename, content_type = await _download_url(url_candidate)
-            source = "file:text/uri-list"
-            used_url = url_candidate
-        else:
-            # Real binary upload
-            content_bytes = await file.read()
-            filename = file.filename or "upload.bin"
-            content_type = file.content_type or "application/octet-stream"
-            source = "file:binary"
-    elif file_url:
-        content_bytes, filename, content_type = await _download_url(file_url)
-        source = "form:file_url"
-        used_url = file_url
-    else:
-        raise HTTPException(status_code=422, detail="No file provided (binary upload, text/uri-list, or file_url).")
-
-    # Prepare payload for the Playwright uploader
+    # Read file bytes for Playwright upload
+    file_bytes = await file.read()
     upload_payload = {
-        "name": filename or "upload.bin",
-        "mimeType": content_type or "application/octet-stream",
-        "buffer": content_bytes or b"",
+        "name": file.filename or "upload.pdf",
+        "mimeType": file.content_type or "application/pdf",
+        "buffer": file_bytes,
     }
 
+    browser = None
+    context = None
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=HEADLESS, slow_mo=SLOW_MO)
             context = browser.new_context(viewport={"width": 1400, "height": 900})
             page = context.new_page()
 
-            # Navigate to the client's documents by EMAIL
+            # Navigate & upload
             fast_login(page)
             open_workflows(page)
+            # 🔎 email-based search (not name)
             search_and_open_client_by_email(page, client_email)
             open_documents_and_discussion_then_documents(page)
             enter_documents_passcode_1111(page)
 
-            # Always Initial checklist
+            # Always Initial
             open_initial_documents_checklist(page)
 
-            # Add item with classified title and upload the Gmail/CloudConvert file
+            # Add classified title + upload the Gmail attachment
             add_document_and_upload(page, doc_title, upload_payload)
 
-            context.close()
-            browser.close()
-
+        # success
         return JSONResponse({
             "ok": True,
             "matched_in_glade": True,
             "routed_checklist": routed_checklist,
             "item_title": doc_title,
-            "source": source,
-            "used_url": used_url,
-            "received_filename": filename,
-            "received_content_type": content_type,
+            "received_filename": file.filename,
+            "received_content_type": file.content_type,
         })
-    except Exception as e:
+    except Exception:
+        err = _exc_details()
+        # Print to server logs as well for easy debugging
+        print("\n[server] ERROR during upload-from-zap-email:\n", err, file=sys.stderr)
         return JSONResponse({
             "ok": False,
             "matched_in_glade": False,
             "fallback_to_drive": True,
-            "error": str(e),
+            "error": err,
             "routed_checklist": routed_checklist,
             "item_title": doc_title,
-            "source": source,
-            "used_url": used_url,
         }, status_code=404)
+    finally:
+        try:
+            if context: context.close()
+        except Exception:
+            pass
+        try:
+            if browser: browser.close()
+        except Exception:
+            pass
+
+
 
 
