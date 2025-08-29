@@ -1,0 +1,24 @@
+﻿# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+env/
+venv/
+*.log
+
+# VS Code
+.vscode/
+
+# Local artifacts
+*.png
+error.png
+upload_success*.png
+
+# Secrets
+.env
+
+# OS cruft
+.DS_Store
+Thumbs.db
