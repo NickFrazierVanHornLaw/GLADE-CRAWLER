@@ -1,4 +1,10 @@
-﻿# server.py
+﻿import sys, asyncio
+if sys.platform.startswith("win"):
+    try:
+        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+    except Exception:
+        pass
+
 import os
 import sys
 import traceback
