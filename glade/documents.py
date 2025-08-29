@@ -2,6 +2,8 @@
 import re
 import time
 from pathlib import Path
+from typing import Any, Union, Optional
+
 from playwright.sync_api import Page, TimeoutError as PWTimeout
 from .helpers import _log
 from .uploads import ensure_sample_pdf, wait_for_upload_processing_complete
@@ -100,7 +102,8 @@ def _row_container_for_text(page: Page, text_regex: re.Pattern):
         node = nodes.nth(i)
         try:
             container = node.locator(
-                'xpath=ancestor::*[.//button[normalize-space()="Open" or contains(translate(.,"OPEN","open"),"open")]][1]'
+                'xpath=ancestor::*[.//button[normalize-space()="Open" or '
+                'contains(translate(.,"OPEN","open"),"open")]][1]'
             )
             if not container.count():
                 container = node.locator('xpath=ancestor::*[self::div or self::section or self::li][1]')
@@ -125,13 +128,19 @@ def _nearest_card_container(node_locator):
     return loc
 
 
-# ---- main action: add item, set toggles, add doc, upload (robust) ---- #
-def open_photo_holding_ids(page: Page, doc_name: str = "Selfie Holding DL & SS") -> None:
+# ---- new: generic add item + upload (supports path or bytes) ---- #
+def add_document_and_upload(
+    page: Page,
+    doc_title: str,
+    upload: Union[str, Path, dict],
+) -> None:
     """
-    Add a new checklist item, set toggles (Required OFF, Private ON),
-    submit, then upload a sample document via the 'Upload' button.
-    Robust: handles both cases where 'Add document' opens the detail view
-    immediately or returns to the list (where we click 'Open' first).
+    Add a new checklist item titled `doc_title`, set toggles (Required OFF, Private ON),
+    click 'Add document', then upload the given file.
+
+    `upload` can be:
+      - a filesystem path (str or Path)
+      - a Playwright FilePayload dict: {"name": "...", "mimeType": "...", "buffer": bytes}
     """
 
     # 1) Click "Add an item"
@@ -162,35 +171,29 @@ def open_photo_holding_ids(page: Page, doc_name: str = "Selfie Holding DL & SS")
     if panel is None:
         panel = page
 
-    # 3) Enter document name
-    name_field = None
-    for sel in (
-        'input[placeholder*="document name" i]',
-        'input[aria-label*="document name" i]',
-        'input[name*="name" i]',
-        'input[placeholder*="name" i]',
-        'input[type="text"]',
-        "textarea",
-    ):
-        loc = panel.locator(sel).first
-        if loc.count():
-            name_field = loc
-            break
-    if not name_field or not name_field.count():
-        tb = panel.get_by_role("textbox").first
-        if tb.count():
-            name_field = tb
-    if not name_field or not name_field.count():
+    # 3) Enter document title
+    name_field = panel.locator(
+        'input[placeholder*="document name" i], '
+        'input[aria-label*="document name" i], '
+        'input[name*="name" i], '
+        'input[placeholder*="name" i], '
+        'input[type="text"], '
+        "textarea"
+    ).first
+    if not name_field.count():
+        name_field = panel.get_by_role("textbox").first
+    if not name_field.count():
         raise RuntimeError("Could not find the document name field after clicking 'Add an item'.")
+
     name_field.click(timeout=2000)
     try:
-        name_field.fill(doc_name)
+        name_field.fill(doc_title)
     except Exception:
         try:
             name_field.press("Control+A")
         except Exception:
             pass
-        name_field.type(doc_name, delay=0)
+        name_field.type(doc_title, delay=0)
 
     # 4) helper to set a labeled switch/checkbox to ON/OFF
     def _set_toggle(label_regex: re.Pattern, want_on: bool):
@@ -201,7 +204,8 @@ def open_photo_holding_ids(page: Page, doc_name: str = "Selfie Holding DL & SS")
             lbl = panel.get_by_text(label_regex).first
             if lbl.count():
                 container = lbl.locator(
-                    'xpath=ancestor::*[.//input[@type="checkbox"] or .//*[@role="switch"] or .//button[@role="switch"] or .//button[contains(@class,"toggle") or contains(@class,"switch")]][1]'
+                    'xpath=ancestor::*[.//input[@type="checkbox"] or .//*[@role="switch"] or '
+                    './/button[@role="switch"] or .//button[contains(@class,"toggle") or contains(@class,"switch")]][1]'
                 )
                 if container.count():
                     tgt = container.locator(
@@ -211,7 +215,7 @@ def open_photo_holding_ids(page: Page, doc_name: str = "Selfie Holding DL & SS")
         if not tgt.count():
             return False
 
-        # current state
+        # Determine current state (checked → ON)
         state = None
         try:
             state = tgt.is_checked()
@@ -220,18 +224,17 @@ def open_photo_holding_ids(page: Page, doc_name: str = "Selfie Holding DL & SS")
                 attr = (tgt.get_attribute("aria-checked") or tgt.get_attribute("data-state") or "").lower()
                 if attr in ("true", "on", "checked"):
                     state = True
-                if attr in ("false", "off", "unchecked"):
+                elif attr in ("false", "off", "unchecked"):
                     state = False
             except Exception:
                 pass
-        if state is None:
-            cls = (tgt.get_attribute("class") or "").lower()
-            state = any(k in cls for k in ("on", "checked", "active", "enabled"))
+            if state is None:
+                cls = (tgt.get_attribute("class") or "").lower()
+                state = any(k in cls for k in ("on", "checked", "active", "enabled"))
 
         if state != want_on:
             try:
                 tgt.click(timeout=2000, force=True)
-                page.wait_for_timeout(150)
             except Exception:
                 try:
                     tgt.press("Space")
@@ -240,6 +243,7 @@ def open_photo_holding_ids(page: Page, doc_name: str = "Selfie Holding DL & SS")
                         tgt.press("Enter")
                     except Exception:
                         pass
+            page.wait_for_timeout(150)
         return True
 
     # 5) Toggle switches (Required OFF, Private ON)
@@ -257,7 +261,7 @@ def open_photo_holding_ids(page: Page, doc_name: str = "Selfie Holding DL & SS")
         raise RuntimeError("Could not find the 'Add document' button.")
     add_doc_btn.click(timeout=4000)
 
-    # small settle/transition
+    # Let transitions/DOM settle
     try:
         page.wait_for_load_state("networkidle", timeout=3000)
     except Exception:
@@ -276,11 +280,11 @@ def open_photo_holding_ids(page: Page, doc_name: str = "Selfie Holding DL & SS")
             return cand
         return None
 
-    # 7) First try: upload is visible immediately (detail view)
+    # 7) Try immediate "Upload" (detail view)
     upload_btn = _find_upload(page)
     if not upload_btn:
-        # 8) Fallback: find the row by name, click Open, then Upload
-        name_pat = re.compile(re.escape(doc_name), re.I)
+        # 8) Fallback: go back to row, click Open, then Upload
+        name_pat = re.compile(re.escape(doc_title), re.I)
         row = None
         try:
             row = _row_container_for_text(page, name_pat)
@@ -310,28 +314,41 @@ def open_photo_holding_ids(page: Page, doc_name: str = "Selfie Holding DL & SS")
     if not upload_btn or not upload_btn.count():
         raise RuntimeError("Could not find the 'Upload' button after adding the document.")
 
-    # 9) Click Upload and choose file
+    # 9) Click Upload and send file (path or FilePayload)
     try:
         with page.expect_file_chooser(timeout=4000) as fc:
             upload_btn.click()
         chooser = fc.value
-        pdf = ensure_sample_pdf(Path("sample_upload.pdf")).resolve()
-        chooser.set_files(str(pdf))
+        chooser.set_files(upload)
     except PWTimeout:
         # fallback: direct file input
         file_input = page.locator('input[type="file"]').first
         if not file_input.count():
             raise RuntimeError("Upload file chooser did not appear and no direct file input was found.")
-        pdf = ensure_sample_pdf(Path("sample_upload.pdf")).resolve()
-        file_input.set_input_files(str(pdf))
+        file_input.set_input_files(upload)
 
     # 10) Wait until upload fully processed
     try:
-        wait_for_upload_processing_complete(page, filename="sample_upload.pdf")
+        # Use filename when possible for better “done” signal
+        if isinstance(upload, dict) and "name" in upload:
+            fname = upload["name"]
+        else:
+            fname = Path(str(upload)).name
+        wait_for_upload_processing_complete(page, filename=fname)
     except Exception:
         pass
 
-    _log(f"Added '{doc_name}', set toggles, and uploaded sample document.")
+    _log(f"Added '{doc_title}', set toggles, and uploaded file.")
+
+
+# ---- backward-compat wrapper (keeps older calls working) ---- #
+def open_photo_holding_ids(page: Page, doc_name: str = "Selfie Holding DL & SS") -> None:
+    """
+    Legacy function preserved for compatibility.
+    Uses a local sample PDF and delegates to add_document_and_upload.
+    """
+    sample_path = ensure_sample_pdf(Path("sample_upload.pdf")).resolve()
+    add_document_and_upload(page, doc_name, str(sample_path))
 
 
 def open_card_menu_by_text(page: Page, card_text: str) -> None:
@@ -353,7 +370,8 @@ def open_card_menu_by_text(page: Page, card_text: str) -> None:
                 pass
 
             menu = container.locator(
-                'button[aria-label*="more" i], button[aria-label*="menu" i], button[aria-haspopup="menu"], button:has-text("…"), button:has-text("...")'
+                'button[aria-label*="more" i], button[aria-label*="menu" i], '
+                'button[aria-haspopup="menu"], button:has-text("…"), button:has-text("...")'
             ).first
             if not menu.count():
                 cand = container.locator(":scope button").filter(

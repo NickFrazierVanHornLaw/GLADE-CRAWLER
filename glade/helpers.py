@@ -1,4 +1,5 @@
-import re, time
+import re
+import time
 from playwright.sync_api import Page, TimeoutError as PWTimeout
 
 def _log(msg: str) -> None:
@@ -54,3 +55,5 @@ def _scroll_list(page: Page) -> None:
         pass
     if not did:
         page.evaluate("window.scrollBy(0, 900)")
+
+
