@@ -26,7 +26,7 @@ def search_and_open_client_by_email(page: Page, email: str, wait_ms: int = 15000
     )
 
     try:
-        page.locator('h1:has-text("Workflow"), h2:has-text("Workflow")').first.wait_for(timeout=4000)
+        page.locator('h1:has-text("Chapter"), h2:has-text("Chapter")').first.wait_for(timeout=4000)
     except Exception:
         pass
 
@@ -77,7 +77,7 @@ def search_and_open_client_by_email(page: Page, email: str, wait_ms: int = 15000
                     # Find nearest ancestor card that also contains 'Workflows' text
                     container = n.locator(
                         'xpath=ancestor::*[self::article or self::section or self::li or self::div]'
-                        '[.//text()[contains(translate(., "WORKFLOWS", "workflows"), "workflows")]]'
+                        '[.//text()[contains(translate(., "Chapter", "Chapters"), "Chapter")]]'
                         '[.//a or .//button][1]'
                     )
                     if container.count():
