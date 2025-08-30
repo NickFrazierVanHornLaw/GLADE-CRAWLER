@@ -90,7 +90,7 @@ def upload_from_zap_email(
     context = None
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=HEADLESS, slow_mo=SLOW_MO)
+            browser = p.webkit.launch(headless=HEADLESS, slow_mo=SLOW_MO)
             context = browser.new_context(viewport={"width": 1400, "height": 900})
             page = context.new_page()
 
