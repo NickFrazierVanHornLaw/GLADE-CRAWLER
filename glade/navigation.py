@@ -86,30 +86,23 @@ def search_and_open_client_by_email(page: Page, email: str, wait_ms: int = 15000
     raise RuntimeError(f"No client card/button found below search bar for email: {email}")
 
 def open_documents_and_discussion_then_documents(page: Page) -> None:
-    for sel in (
-        '[role="tab"]:has-text("Documents & Discussion")',
-        '[role="tab"]:has-text("Documents and Discussion")',
-        'a:has-text("Documents & Discussion")',
-        'a:has-text("Documents and Discussion")',
-        'button:has-text("Documents & Discussion")',
-        'button:has-text("Documents and Discussion")',
-        'text=/Documents\\s*(&|and)\\s*Discussion/i',
-    ):
-        try: page.locator(sel).first.click(timeout=2000); break
-        except Exception: pass
-
+    """
+    Skip 'Documents & Discussion' and go straight to opening the 'Documents' tab.
+    """
     for sel in (
         '[role="tab"]:has-text("Documents")',
         'a:has-text("Documents")',
         'button:has-text("Documents")',
         'nav >> text=Documents',
+        'text=Documents',
     ):
         try:
             page.locator(sel).first.click(timeout=3000)
             page.wait_for_load_state("domcontentloaded")
             _log("opened Documents tab")
             return
-        except Exception: pass
+        except Exception:
+            pass
     raise RuntimeError("Could not open Documents tab.")
 
 def open_documents_checklist(page: Page, which: str) -> None:
