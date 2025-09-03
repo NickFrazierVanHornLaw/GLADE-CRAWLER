@@ -23,11 +23,6 @@ def search_and_open_client_by_email(page: Page, email: str, wait_ms: int = 15000
         '[contenteditable="true"]',
     )
 
-    try:
-        page.locator('h1:has-text("Chapter"), h2:has-text("Chapter")').first.wait_for(timeout=4000)
-    except Exception:
-        pass
-
     search = None
     for s in search_sels:
         loc = page.locator(s).first
