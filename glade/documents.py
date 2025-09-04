@@ -1,8 +1,8 @@
 # glade/documents.py
+# glade/documents.py
 import re
-import time
 from pathlib import Path
-from typing import Any, Union, Optional
+from typing import Union
 
 from playwright.sync_api import Page, TimeoutError as PWTimeout
 from .helpers import _log
@@ -10,19 +10,29 @@ from .uploads import ensure_sample_pdf, wait_for_upload_processing_complete
 
 
 def enter_documents_passcode_1111(page: Page) -> None:
+    """
+    Robustly enter a 4-digit passcode '1111' on either segmented (4 inputs) or single input forms.
+    Includes patient waits so UI has time to render the gate after Documents loads.
+    """
     try:
-        for _ in range(40):
+        # Wait up to ~10s for the passcode gate to appear
+        for _ in range(50):
             gate = page.get_by_text(
-                re.compile("Enter passcode to access case documents", re.I)
+                re.compile(r"Enter\s+passcode\s+to\s+access\s+case\s+documents", re.I)
             ).first
             inputs = page.locator(
                 'input[maxlength="1"], input[autocomplete="one-time-code"], input[type="tel"], input[type="password"]'
             )
             if gate.count() or inputs.count():
                 break
-            page.wait_for_timeout(250)
+            page.wait_for_timeout(200)
         else:
+            # No passcode gate; nothing to do
+            _log("no documents passcode gate detected")
             return
+
+        # Give a small extra pause for scripts binding
+        page.wait_for_timeout(350)
 
         inputs = page.locator(
             'input[maxlength="1"], input[autocomplete="one-time-code"], input[type="tel"], input[type="password"]'
@@ -33,18 +43,23 @@ def enter_documents_passcode_1111(page: Page) -> None:
             for i in range(4):
                 box = inputs.nth(i)
                 try:
-                    box.click(timeout=800)
+                    box.click(timeout=1000)
                     box.fill("1")
                 except Exception:
                     try:
-                        box.type("1", delay=0)
+                        box.type("1", delay=10)
                     except Exception:
                         pass
+            page.wait_for_timeout(150)
         else:
             first = inputs.first if count else page.locator("input").first
-            first.click(timeout=800)
-            first.fill("1111")
+            first.click(timeout=1200)
+            try:
+                first.fill("1111")
+            except Exception:
+                first.type("1111", delay=10)
 
+        # Ensure total length == 4
         try:
             total_len = 0
             for i in range(min(count, 4)):
@@ -57,25 +72,31 @@ def enter_documents_passcode_1111(page: Page) -> None:
             total_len = 4
 
         if total_len < 4:
-            page.keyboard.type("1" * (4 - total_len), delay=0)
+            page.keyboard.type("1" * (4 - total_len), delay=10)
 
-        submit = page.get_by_role("button", name=re.compile("^submit$", re.I)).first
+        # Click submit
+        submit = page.get_by_role("button", name=re.compile(r"^submit$", re.I)).first
         if submit.count():
-            submit.click(timeout=2000)
+            submit.click(timeout=2500)
         else:
-            page.locator('button:has-text("Submit"), button[type="submit"]').first.click(timeout=2000)
+            alt = page.locator('button:has-text("Submit"), button[type="submit"]').first
+            if alt.count():
+                alt.click(timeout=2500)
 
-        page.wait_for_timeout(400)
+        page.wait_for_timeout(500)
         _log("entered passcode 1111 (fill then submit)")
     except Exception:
         try:
             page.locator("input").first.fill("1111")
-            page.get_by_role("button", name=re.compile("^submit$", re.I)).click()
+            page.get_by_role("button", name=re.compile(r"^submit$", re.I)).click()
         except Exception:
             pass
 
 
 def open_initial_documents_checklist(page: Page) -> None:
+    """
+    Click the 'Initial Document(s) Checklist' tab.
+    """
     for sel in (
         'text="Initial Document Checklist"',
         'text="Initial Documents Checklist"',
@@ -86,8 +107,8 @@ def open_initial_documents_checklist(page: Page) -> None:
         'button:has-text("Initial Document Checklist")',
     ):
         try:
-            page.locator(sel).first.click(timeout=2500)
-            page.wait_for_timeout(500)
+            page.locator(sel).first.click(timeout=3000, force=True)
+            page.wait_for_timeout(700)
             _log("opened Initial Document Checklist tab")
             return
         except Exception:
@@ -95,7 +116,6 @@ def open_initial_documents_checklist(page: Page) -> None:
     raise RuntimeError("Could not open 'Initial Document(s) Checklist'.")
 
 
-# ---- helpers for rows/cards (scoped to this module) ---- #
 def _row_container_for_text(page: Page, text_regex: re.Pattern):
     nodes = page.get_by_text(text_regex)
     for i in range(min(nodes.count(), 8)):
@@ -128,7 +148,6 @@ def _nearest_card_container(node_locator):
     return loc
 
 
-# ---- new: generic add item + upload (supports path or bytes) ---- #
 def add_document_and_upload(
     page: Page,
     doc_title: str,
@@ -142,17 +161,47 @@ def add_document_and_upload(
       - a filesystem path (str or Path)
       - a Playwright FilePayload dict: {"name": "...", "mimeType": "...", "buffer": bytes}
     """
+    # New pre-check: "Re-open documents request" -> then "Continue Uploading"
+    try:
+        reopen_btn = page.get_by_role("button", name=re.compile(r"^re-?open\s+documents?\s+request$", re.I)).first
+        if not reopen_btn.count():
+            reopen_btn = page.locator('button:has-text("Re-open documents request")').first
+        if reopen_btn.count():
+            reopen_btn.click(timeout=3000)
+            page.wait_for_timeout(400)
+            cont = page.get_by_role("button", name=re.compile(r"^continue\s+uploading$", re.I)).first
+            if not cont.count():
+                cont = page.locator('button:has-text("Continue Uploading")').first
+            if cont.count():
+                cont.click(timeout=3000)
+                page.wait_for_timeout(400)
+    except Exception:
+        pass
+
+    # Wait a moment for buttons to render
+    page.wait_for_timeout(500)
 
     # 1) Click "Add an item"
     add_btn = page.get_by_role("button", name=re.compile(r"^add\s+an\s+item$", re.I)).first
     if not add_btn.count():
-        add_btn = page.locator(
-            'button:has-text("Add an item"), button:has-text("Add Item"), text=/^Add an item$/i'
-        ).first
+        for sel in ('button:has-text("Add an item")', 'button:has-text("Add Item")'):
+            try:
+                cand = page.locator(sel).first
+                if cand.count():
+                    add_btn = cand
+                    break
+            except Exception:
+                pass
+    if not add_btn.count():
+        # Try visible text hit then nearest clickable
+        txt = page.get_by_text(re.compile(r"^Add\s+an\s+item$", re.I)).first
+        if txt.count():
+            add_btn = txt.locator('xpath=ancestor::button[1]')
     if not add_btn.count():
         raise RuntimeError("Could not find the 'Add an item' button.")
+
     add_btn.click(timeout=5000)
-    page.wait_for_timeout(300)
+    page.wait_for_timeout(350)
 
     # 2) Scope to dialog/drawer if present
     panel = None
@@ -193,7 +242,7 @@ def add_document_and_upload(
             name_field.press("Control+A")
         except Exception:
             pass
-        name_field.type(doc_title, delay=0)
+        name_field.type(doc_title, delay=10)
 
     # 4) helper to set a labeled switch/checkbox to ON/OFF
     def _set_toggle(label_regex: re.Pattern, want_on: bool):
@@ -256,7 +305,14 @@ def add_document_and_upload(
     # 6) Click "Add document"
     add_doc_btn = panel.get_by_role("button", name=re.compile(r"^add\s+document$", re.I)).first
     if not add_doc_btn.count():
-        add_doc_btn = page.locator('button:has-text("Add document"), button:has-text("Add Document")').first
+        for sel in ('button:has-text("Add document")', 'button:has-text("Add Document")'):
+            try:
+                cand = page.locator(sel).first
+                if cand.count():
+                    add_doc_btn = cand
+                    break
+            except Exception:
+                pass
     if not add_doc_btn.count():
         raise RuntimeError("Could not find the 'Add document' button.")
     add_doc_btn.click(timeout=4000)
@@ -265,7 +321,7 @@ def add_document_and_upload(
     try:
         page.wait_for_load_state("networkidle", timeout=3000)
     except Exception:
-        page.wait_for_timeout(300)
+        page.wait_for_timeout(350)
 
     # helper: find an Upload button in a given scope
     def _find_upload(scope):
@@ -329,7 +385,6 @@ def add_document_and_upload(
 
     # 10) Wait until upload fully processed
     try:
-        # Use filename when possible for better “done” signal
         if isinstance(upload, dict) and "name" in upload:
             fname = upload["name"]
         else:
@@ -341,12 +396,7 @@ def add_document_and_upload(
     _log(f"Added '{doc_title}', set toggles, and uploaded file.")
 
 
-# ---- backward-compat wrapper (keeps older calls working) ---- #
 def open_photo_holding_ids(page: Page, doc_name: str = "Selfie Holding DL & SS") -> None:
-    """
-    Legacy function preserved for compatibility.
-    Uses a local sample PDF and delegates to add_document_and_upload.
-    """
     sample_path = ensure_sample_pdf(Path("sample_upload.pdf")).resolve()
     add_document_and_upload(page, doc_name, str(sample_path))
 
