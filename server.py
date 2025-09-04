@@ -37,12 +37,93 @@ OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5")
 BROWSER_ENGINE = os.getenv("BROWSER_ENGINE", "chromium").lower()  # chromium|webkit|firefox
 BROWSER_CHANNEL = os.getenv("BROWSER_CHANNEL", "msedge").lower()  # msedge|chrome|msedge-beta|...
 
-OPENAI_NAMING_PROMPT = """You will be given the first page of a document (title + a little text).
-Return a VERY short, human-friendly document title used in a law firm's intake checklist.
-Do NOT include the person's name or email. Prefer specific labels like "Driver's License", 
-"Social Security Card", "Paystub", "Bank Statement", "Photo Holding IDs", "Tax Return 2023", etc.
-If unreadable or blank, respond exactly: UnrecognizableDoc.
-Return only the title. No punctuation at the end.
+OPENAI_NAMING_PROMPT = """You are a document **classification + renaming** assistant. Read the full text under **“Text to Analyze”** and output **exactly one line**: the **final filename**.
+**No explanations. No extra lines. No quotes. No punctuation beyond what appears in the filename. Always end with `.pdf`.**
+### Global rules
+* Use **Title Case**; collapse multiple spaces; remove commas and strange symbols.
+* Never include full account numbers; use **LAST4** when available, else **XXXX** (except Online Deposit Accounts).
+* Dates must be **MM.DD.YY** (zero-padded). For ranges, use `START-END`.
+  If only a month/year is given, use the **first and last day of that month** (handle 28/29/30/31 correctly).
+  If **no date**, use the exact literal shown in the pattern (`NoDate` or `Nodate`).
+* **Provider normalization**: remove spaces/punctuation and join words (e.g., “Fifth Third Bank” → `FifthThirdBank`).
+  Common abbreviations: Navy Federal Credit Union → `NFCU`, Bank of America → `BofA`, U.S. Bank → `USBank`, American Express → `AmEx`.
+* **Online Deposit Accounts** (Cash App/CashApp, PayPal, Venmo, Chime, Apple Cash, Google Pay): **do not** include LAST4/XXXX.
+* If nothing clearly matches a rule, return **`UnrecognizedDocs.pdf`**.
+### Output formats (return **one** filename that best fits)
+**TAX RETURNS**
+* `2022 Tax Return.pdf`
+* `2023 Tax Return Transcript.pdf`
+* `NoYear Tax Return.pdf`
+* `NoYear Tax Return Transcript.pdf`
+**PAY STUBS**
+* `PayStub-MM.DD.YY.pdf`
+* `PayStub-NoDate.pdf`
+**BENEFIT LETTERS**
+* `YYYY Disability Letter.pdf`
+* `YYYY Benefit Letter.pdf`
+* `YYYY Social Security Benefit Letter.pdf`
+* `YYYY VA Benefit Statement.pdf`
+* `YYYY Pension Statement.pdf`
+* `YYYY Letter of Financial Support.pdf`
+* `UnrecognizableDoc.pdf`
+**PROFIT & LOSS**
+* `Profit & Loss - MM.DD.YY-MM.DD.YY.pdf`
+* `Profit & Loss - NoDate.pdf`
+**BANK STATEMENTS**
+* `ProviderName-LAST4-MM.DD.YY-MM.DD.YY.pdf`
+* `ProviderName-XXXX-MM.01.YY-MM.[lastDay].YY.pdf` *(when only month/year given)*
+* `ProviderName-XXXX-Nodate.pdf`
+* `ProviderName-MM.DD.YY-MM.DD.YY.pdf`
+* `ProviderName-MM.01.YY-MM.[lastDay].YY.pdf`
+* `ProviderName-Nodate.pdf`
+* If clearly a **Business** account, append ` (Business)` **before** `.pdf`
+**RETIREMENT & INSURANCE**
+* `CompanyName (401k).pdf`
+* `CompanyName (IRA).pdf`
+* `CompanyName (Annuity).pdf`
+* `CompanyName (Life Insurance).pdf`
+* `CompanyName (Retirement Savings).pdf`
+* `UnknownProvider (401k/IRA/etc.).pdf` *(pick the closest type)*
+**IDENTIFICATION**
+* `DL.pdf`
+* `SS.pdf`
+* `DL & SS Selfie.pdf`
+* `SS (not signed).pdf`
+* `DL (expired).pdf`
+**VEHICLE**
+* `YYYY Make - title.pdf`
+* `YYYY Make - registration.pdf`
+* `YYYY Make - insurance card.pdf`
+* `YYYY Make - financial statement.pdf`
+* `MM.DD.YY - title.pdf` *(or registration/insurance card/financial statement)*
+**UTILITIES**
+* `ProviderName - Electric Bill.pdf`
+* `ProviderName - Water Bill.pdf`
+* `ProviderName - Internet Bill.pdf`
+* `ProviderName - Phone Bill.pdf`
+* `UnknownProvider - Bill Type.pdf`
+**MORTGAGE / LEASE / RENT**
+* `Mortgage Statement.pdf`
+* `Residential Lease.pdf`
+* `Timeshare Agreement.pdf`
+* `Rent Letter.pdf`
+**CREDIT CARD & TAX LIABILITIES**
+* `CreditorName-XXXX.pdf`
+* `YYYY Tax Liability Notice - MM.DD.YY.pdf`
+**MEDICAL BILLS**
+* `FacilityName-XXXX - MM.DD.YY.pdf`
+**LAWSUITS**
+* `Plaintiff v. DefendantLastName - DocType.pdf`
+**CLIENT FORMS**
+* `Client Information Worksheet.pdf`
+* `Client Information Worksheet (updated) - MM.DD.YY.pdf`
+* `Debtors 341 Questionnaire.pdf`
+* `Rights & Responsibilities - LF90 Ch.13.pdf`
+**COURSE CERTIFICATES**
+* `Certificate of Counseling - LastName.pdf`
+  *(Also use this **exact** name when the text contains:)*
+### Final instruction
+Return **only** the filename on a single line, with `.pdf`.
 """
 
 # Lazily-initialized globals
@@ -258,10 +339,10 @@ def attempt_glade_upload(
     """
     Returns (success, error_message). Self-contained Playwright + Glade flow.
 
-    FIX: The checklist ITEM title is the CLASSIFIED BUCKET (e.g., "Bank statements"),
-    while the uploaded FILE name uses the AI-proposed title (e.g., "Mortgage Statement.pdf").
+    Uses _ALLOWED_LABELS from glade.documents to choose the checklist bucket.
+    The uploaded FILE name still uses the AI-proposed title (sanitized .pdf).
     """
-    import os, re
+    import os, re, difflib
 
     def _safe_pdf_name(title: str) -> str:
         t = re.sub(r"\s+", " ", (title or "").strip())
@@ -272,6 +353,66 @@ def attempt_glade_upload(
         if not re.search(r"\.pdf$", t, re.I):
             t = f"{t}.pdf"
         return t
+
+    def _normalize_to_allowed_label(raw_label: str, allowed: list[str]) -> str:
+        """Map any classifier/raw label to one of the allowed labels."""
+        if not raw_label:
+            return "UnrecognizedDocs"
+
+        rl = raw_label.strip().lower()
+
+        # 1) Exact (case-insensitive)
+        for lab in allowed:
+            if rl == lab.lower():
+                return lab
+
+        # 2) Synonym/contains mapping
+        synonyms = {
+            "bank statement": "Bank Statements",
+            "bank statements": "Bank Statements",
+            "bank": "Bank Statements",
+            "vehicle": "Vehicle Info",
+            "vehicle info": "Vehicle Info",
+            "vehicles": "Vehicle Info",
+            "income": "Income",
+            "pay stub": "Income",
+            "pay stubs": "Income",
+            "paystub": "Income",
+            "paystubs": "Income",
+            "tax return": "Tax Returns",
+            "tax returns": "Tax Returns",
+            "lawsuit": "Lawsuits",
+            "lawsuits": "Lawsuits",
+            "lease": "Lease",
+            "mortgage": "Home/Rent Information",
+            "rent": "Home/Rent Information",
+            "credit card": "Credit Cards",
+            "credit cards": "Credit Cards",
+            "utility": "Utility",
+            "utilities": "Utility",
+            "credit counseling certificate": "Credit Counseling Certificate",
+            "home/rent information": "Home/Rent Information",
+            "identification": "Identification",
+            "retirement": "Retirement & Insurance",
+            "insurance": "Retirement & Insurance",
+            "medical": "Medical Bills",
+            "client form": "Client Forms",
+            "client forms": "Client Forms",
+            "unrecognizable": "UnrecognizedDocs",
+            "unrecognizeable": "UnrecognizedDocs",
+        }
+        for key, target in synonyms.items():
+            if key in rl:
+                for lab in allowed:
+                    if lab.lower() == target.lower():
+                        return lab
+
+        # 3) Fuzzy closest match to any allowed label
+        best = difflib.get_close_matches(raw_label, allowed, n=1, cutoff=0.0)
+        if best:
+            return best[0]
+
+        return "UnrecognizedDocs"
 
     browser = None
     context = None
@@ -285,8 +426,11 @@ def attempt_glade_upload(
             search_and_open_client_by_email,
             search_and_open_client_by_name,
             open_documents_and_discussion_then_documents,
+            _press_continue_uploading_if_present,  # NEW
         )
+        # Import ALLOWED_LABELS from documents so we use the single source of truth
         from glade.documents import (
+            _ALLOWED_LABELS as DOC_ALLOWED_LABELS,
             enter_documents_passcode_1111,
             open_initial_documents_checklist,
             add_document_and_upload,
@@ -346,9 +490,17 @@ def attempt_glade_upload(
             enter_documents_passcode_1111(page)
             open_initial_documents_checklist(page)
 
-            # Map to checklist BUCKET for ITEM title
-            _ignored, checklist_bucket = classify_for_checklist(doc_title)
-            print(f"[DEBUG] Checklist bucket for '{doc_title}' -> '{checklist_bucket}'")
+            # NEW: Dismiss any blocking "Continue Uploading" overlay immediately
+            try:
+                if _press_continue_uploading_if_present(page):
+                    print('[DEBUG] "Continue Uploading" overlay dismissed')
+            except Exception:
+                pass
+
+            # Classifier → normalized to allowed label
+            _ignored, raw_bucket = classify_for_checklist(doc_title)
+            checklist_bucket = _normalize_to_allowed_label(raw_bucket or doc_title, list(DOC_ALLOWED_LABELS))
+            print(f"[DEBUG] Classifier bucket='{raw_bucket}' → normalized bucket='{checklist_bucket}'")
 
             # FILE name uses AI-proposed title
             final_upload_name = _safe_pdf_name(doc_title)
@@ -360,7 +512,7 @@ def attempt_glade_upload(
                 "buffer": upload_bytes,
             }
 
-            # IMPORTANT: Use the BUCKET as the checklist item's title, not the AI title
+            # Use the normalized BUCKET as the checklist section to upload into
             add_document_and_upload(page, checklist_bucket, payload)
 
             print("[DEBUG] Upload to Glade completed")

@@ -302,6 +302,38 @@ def open_documents_and_discussion_then_documents(page: Page) -> None:
     raise RuntimeError("Could not open Documents tab via tabbing.")
 
 
+def _press_continue_uploading_if_present(page: Page) -> bool:
+    """
+    If a blocking 'Continue Uploading' button is present on the Initial/Additional
+    Documents Checklist view (overlay, modal, or inline), click it to clear the screen.
+    Returns True if clicked.
+    """
+    for _ in range(6):  # retry briefly to allow late render
+        try:
+            btn = page.get_by_role("button", name=re.compile(r"^continue\s+uploading$", re.I)).first
+            if not btn.count():
+                btn = page.locator('button:has-text("Continue Uploading"), a:has-text("Continue Uploading")').first
+            if btn.count() and btn.is_visible():
+                try:
+                    btn.scroll_into_view_if_needed(timeout=800)
+                except Exception:
+                    pass
+                try:
+                    btn.click(timeout=2500, force=True)
+                except Exception:
+                    try:
+                        btn.press("Enter")
+                    except Exception:
+                        pass
+                page.wait_for_timeout(400)
+                _log('dismissed "Continue Uploading" overlay')
+                return True
+        except Exception:
+            pass
+        page.wait_for_timeout(300)
+    return False
+
+
 def open_documents_checklist(page: Page, which: str) -> None:
     labels = {
         "initial": ("Initial Document Checklist", "Initial Documents Checklist"),
@@ -313,10 +345,18 @@ def open_documents_checklist(page: Page, which: str) -> None:
             try:
                 page.locator(sel).first.click(timeout=3500, force=True)
                 page.wait_for_timeout(900)
+                # Immediately clear any blocking overlay if present
+                _press_continue_uploading_if_present(page)
                 _log(f"opened {text}")
                 return
             except Exception:
                 continue
+
+    # If we might already be on the checklist view, still try clearing overlay once
+    if _press_continue_uploading_if_present(page):
+        _log(f"{targets[0]} assumed open; overlay cleared")
+        return
+
     raise RuntimeError(f"Could not open '{targets[0]}'")
 
 
