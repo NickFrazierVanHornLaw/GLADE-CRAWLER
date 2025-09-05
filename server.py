@@ -25,7 +25,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ====== CONFIG ======
-HEADLESS = os.getenv("HEADLESS", "false").lower() == "false"
+HEADLESS = os.getenv("HEADLESS", "true").lower() == "true"
 SLOW_MO = int(os.getenv("SLOW_MO", "0"))
 ZAP_SHARED_SECRET = os.getenv("ZAP_SHARED_SECRET", "")
 DEBUG_TRACES = os.getenv("DEBUG_TRACES", "true").lower() == "true"
