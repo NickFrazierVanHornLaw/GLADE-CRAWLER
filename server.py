@@ -38,7 +38,7 @@ BROWSER_ENGINE = os.getenv("BROWSER_ENGINE", "chromium").lower()  # chromium|web
 BROWSER_CHANNEL = os.getenv("BROWSER_CHANNEL", "msedge").lower()  # msedge|chrome|msedge-beta|...
 
 OPENAI_NAMING_PROMPT = """You are a document **classification + renaming** assistant. Read the full text under **“Text to Analyze”** and output **exactly one line**: the **final filename**.
-**No explanations. No extra lines. No quotes. No punctuation beyond what appears in the filename. Always end with `.pdf`.**
+**No explanations. No extra lines. No quotes. No punctuation beyond what appears in the filename. Never include `.pdf` at the end.**
 ### Global rules
 * Use **Title Case**; collapse multiple spaces; remove commas and strange symbols.
 * Never include full account numbers; use **LAST4** when available, else **XXXX** (except Online Deposit Accounts).
@@ -48,83 +48,84 @@ OPENAI_NAMING_PROMPT = """You are a document **classification + renaming** assis
 * **Provider normalization**: remove spaces/punctuation and join words (e.g., “Fifth Third Bank” → `FifthThirdBank`).
   Common abbreviations: Navy Federal Credit Union → `NFCU`, Bank of America → `BofA`, U.S. Bank → `USBank`, American Express → `AmEx`.
 * **Online Deposit Accounts** (Cash App/CashApp, PayPal, Venmo, Chime, Apple Cash, Google Pay): **do not** include LAST4/XXXX.
-* If nothing clearly matches a rule, return **`UnrecognizedDocs.pdf`**.
+* If nothing clearly matches a rule, return **`UnrecognizedDocs`**.
 ### Output formats (return **one** filename that best fits)
 **TAX RETURNS**
-* `2022 Tax Return.pdf`
-* `2023 Tax Return Transcript.pdf`
-* `NoYear Tax Return.pdf`
-* `NoYear Tax Return Transcript.pdf`
+* `2022 Tax Return`
+* `2023 Tax Return Transcript`
+* `NoYear Tax Return`
+* `NoYear Tax Return Transcript`
 **PAY STUBS**
-* `PayStub-MM.DD.YY.pdf`
-* `PayStub-NoDate.pdf`
+* `PayStub-MM.DD.YY`
+* `PayStub-NoDate`
 **BENEFIT LETTERS**
-* `YYYY Disability Letter.pdf`
-* `YYYY Benefit Letter.pdf`
-* `YYYY Social Security Benefit Letter.pdf`
-* `YYYY VA Benefit Statement.pdf`
-* `YYYY Pension Statement.pdf`
-* `YYYY Letter of Financial Support.pdf`
-* `UnrecognizableDoc.pdf`
+* `YYYY Disability Letter`
+* `YYYY Benefit Letter`
+* `YYYY Social Security Benefit Letter`
+* `YYYY VA Benefit Statement`
+* `YYYY Pension Statement`
+* `YYYY Letter of Financial Support`
+* `UnrecognizableDoc`
 **PROFIT & LOSS**
-* `Profit & Loss - MM.DD.YY-MM.DD.YY.pdf`
-* `Profit & Loss - NoDate.pdf`
+* `Profit & Loss - MM.DD.YY-MM.DD.YY`
+* `Profit & Loss - NoDate`
 **BANK STATEMENTS**
-* `ProviderName-LAST4-MM.DD.YY-MM.DD.YY.pdf`
-* `ProviderName-XXXX-MM.01.YY-MM.[lastDay].YY.pdf` *(when only month/year given)*
-* `ProviderName-XXXX-Nodate.pdf`
-* `ProviderName-MM.DD.YY-MM.DD.YY.pdf`
-* `ProviderName-MM.01.YY-MM.[lastDay].YY.pdf`
-* `ProviderName-Nodate.pdf`
-* If clearly a **Business** account, append ` (Business)` **before** `.pdf`
+* `ProviderName-LAST4-MM.DD.YY-MM.DD.YY`
+* `ProviderName-XXXX-MM.01.YY-MM.[lastDay].YY` *(when only month/year given)*
+* `ProviderName-XXXX-Nodate`
+* `ProviderName-MM.DD.YY-MM.DD.YY`
+* `ProviderName-MM.01.YY-MM.[lastDay].YY`
+* `ProviderName-Nodate`
+* If clearly a **Business** account, append ` (Business)`
 **RETIREMENT & INSURANCE**
-* `CompanyName (401k).pdf`
-* `CompanyName (IRA).pdf`
-* `CompanyName (Annuity).pdf`
-* `CompanyName (Life Insurance).pdf`
-* `CompanyName (Retirement Savings).pdf`
-* `UnknownProvider (401k/IRA/etc.).pdf` *(pick the closest type)*
+* `CompanyName (401k)`
+* `CompanyName (IRA)`
+* `CompanyName (Annuity)`
+* `CompanyName (Life Insurance)`
+* `CompanyName (Retirement Savings)`
+* `UnknownProvider (401k/IRA/etc.)` *(pick the closest type)*
 **IDENTIFICATION**
-* `DL.pdf`
-* `SS.pdf`
-* `DL & SS Selfie.pdf`
-* `SS (not signed).pdf`
-* `DL (expired).pdf`
+* `DL`
+* `SS`
+* `DL & SS Selfie`
+* `SS (not signed)`
+* `DL (expired)`
 **VEHICLE**
-* `YYYY Make - title.pdf`
-* `YYYY Make - registration.pdf`
-* `YYYY Make - insurance card.pdf`
-* `YYYY Make - financial statement.pdf`
-* `MM.DD.YY - title.pdf` *(or registration/insurance card/financial statement)*
+* `YYYY Make - title`
+* `YYYY Make - registration`
+* `YYYY Make - insurance card`
+* `YYYY Make - financial statement`
+* `MM.DD.YY - title` *(or registration/insurance card/financial statement)*
 **UTILITIES**
-* `ProviderName - Electric Bill.pdf`
-* `ProviderName - Water Bill.pdf`
-* `ProviderName - Internet Bill.pdf`
-* `ProviderName - Phone Bill.pdf`
-* `UnknownProvider - Bill Type.pdf`
+* `ProviderName - Electric Bill`
+* `ProviderName - Water Bill`
+* `ProviderName - Internet Bill`
+* `ProviderName - Phone Bill`
+* `UnknownProvider - Bill Type`
 **MORTGAGE / LEASE / RENT**
-* `Mortgage Statement.pdf`
-* `Residential Lease.pdf`
-* `Timeshare Agreement.pdf`
-* `Rent Letter.pdf`
+* `Mortgage Statement`
+* `Residential Lease`
+* `Timeshare Agreement`
+* `Rent Letter`
 **CREDIT CARD & TAX LIABILITIES**
-* `CreditorName-XXXX.pdf`
-* `YYYY Tax Liability Notice - MM.DD.YY.pdf`
+* `CreditorName-XXXX`
+* `YYYY Tax Liability Notice - MM.DD.YY`
 **MEDICAL BILLS**
-* `FacilityName-XXXX - MM.DD.YY.pdf`
+* `FacilityName-XXXX - MM.DD.YY`
 **LAWSUITS**
-* `Plaintiff v. DefendantLastName - DocType.pdf`
+* `Plaintiff v. DefendantLastName - DocType`
 **CLIENT FORMS**
-* `Client Information Worksheet.pdf`
-* `Client Information Worksheet (updated) - MM.DD.YY.pdf`
-* `Debtors 341 Questionnaire.pdf`
-* `Rights & Responsibilities - LF90 Ch.13.pdf`
+* `Client Information Worksheet`
+* `Client Information Worksheet (updated) - MM.DD.YY`
+* `Debtors 341 Questionnaire`
+* `Rights & Responsibilities - LF90 Ch.13`
 **COURSE CERTIFICATES**
-* `Certificate of Counseling - LastName.pdf`
+* `Certificate of Counseling - LastName`
   *(Also use this **exact** name when the text contains:)*
 ### Final instruction
-Return **only** the filename on a single line, with `.pdf`.
+Return **only** the filename on a single line, with no `.pdf` extension.
 """
+
 
 # Lazily-initialized globals
 _openai_client = None
